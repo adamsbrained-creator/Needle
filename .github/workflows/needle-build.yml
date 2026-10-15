@@ -1,0 +1,91 @@
+name: Needle build (any zip)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Full history so the newest zip can be told apart by commit time
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Find and unpack the Needle zip
+        run: |
+          set -euo pipefail
+          mapfile -d '' zips < <(find . -maxdepth 3 -type f -iname '*.zip' \
+            -not -path './.git/*' -not -path './build-src/*' -print0)
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "::error::No .zip file found in the repo. Upload the Needle source zip (any name) and push again."
+            exit 1
+          fi
+
+          newest=""; newest_ts=-1
+          for f in "${zips[@]}"; do
+            ts=$(git log -1 --format=%ct -- "$f" 2>/dev/null || true)
+            ts=${ts:-0}
+            echo "Found: $f ($(stat -c%s "$f") bytes, last committed at $ts)"
+            if [ "$ts" -gt "$newest_ts" ]; then newest="$f"; newest_ts=$ts; fi
+          done
+          echo "Using: $newest"
+
+          if ! unzip -tq "$newest" > /dev/null 2>&1; then
+            echo "::error::'$newest' is not a readable zip ($(stat -c%s "$newest") bytes). The upload is probably cut off or damaged. Upload it again and check the size on GitHub matches the original."
+            exit 1
+          fi
+
+          unzip -q "$newest" -d build-src
+          GRADLEW=$(find build-src -maxdepth 3 -type f -name gradlew | head -n 1)
+          if [ -z "$GRADLEW" ]; then
+            echo "::error::No gradlew found inside '$newest'. Is this the Needle project zip?"
+            ls build-src
+            exit 1
+          fi
+          echo "NEEDLE_DIR=$(dirname "$GRADLEW")" >> "$GITHUB_ENV"
+          echo "Project folder: $(dirname "$GRADLEW")"
+
+      - uses: actions/setup-java@v6
+        with:
+          java-version: 17
+          distribution: 'zulu'
+          cache: gradle
+          cache-dependency-path: |
+            build-src/**/*.gradle*
+            build-src/**/gradle-wrapper.properties
+            build-src/**/libs.versions.toml
+
+      - name: Prepare signing key
+        env:
+          NEEDLE_KEYSTORE_BASE64: ${{ secrets.NEEDLE_KEYSTORE_BASE64 }}
+          NEEDLE_KEYSTORE_PASSWORD: ${{ secrets.NEEDLE_KEYSTORE_PASSWORD }}
+          NEEDLE_KEY_ALIAS: ${{ secrets.NEEDLE_KEY_ALIAS }}
+          NEEDLE_KEY_PASSWORD: ${{ secrets.NEEDLE_KEY_PASSWORD }}
+        working-directory: ${{ env.NEEDLE_DIR }}
+        run: |
+          if [ -n "$NEEDLE_KEYSTORE_BASE64" ]; then
+            mkdir -p .config
+            echo "$NEEDLE_KEYSTORE_BASE64" | base64 -d > .config/needle-release.p12
+            printf 'key_alias=%s\nkey_password=%s\nstore_password=%s\nstore_file=.config/needle-release.p12\n' \
+              "$NEEDLE_KEY_ALIAS" "$NEEDLE_KEY_PASSWORD" "$NEEDLE_KEYSTORE_PASSWORD" > .config/keystore.properties
+          else
+            echo "::warning::No signing secrets found. Building with the debug key, so updates will not install over older builds."
+          fi
+
+      - name: Build Needle (release)
+        working-directory: ${{ env.NEEDLE_DIR }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleFdroidRelease --no-daemon --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -XX:ReservedCodeCacheSize=512m -Dfile.encoding=UTF-8"
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: needle-apk
+          path: ${{ env.NEEDLE_DIR }}/app/build/outputs/apk/fdroid/release/*.apk
+          retention-days: 30
