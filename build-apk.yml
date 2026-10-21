@@ -1,0 +1,62 @@
+# Put this file at .github/workflows/build-apk.yml (replace the old one).
+# Upload a source zip to the repo root and push: this unpacks the newest zip and builds it.
+# If the repo root already has gradlew (an unzipped project), it builds that instead.
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find the project
+        run: |
+          if [ -f gradlew ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # newest zip by commit history, falling back to the highest name
+          ZIP=""
+          for f in $(git log --name-only --diff-filter=AM --pretty=format: -- '*.zip' | grep . | awk '!seen[$0]++'); do
+            if [ -f "$f" ]; then ZIP="$f"; break; fi
+          done
+          if [ -z "$ZIP" ]; then ZIP=$(ls *.zip 2>/dev/null | sort -V | tail -1); fi
+          if [ -z "$ZIP" ]; then echo "No gradlew and no zip in the repo root"; exit 1; fi
+
+          echo "Using $ZIP"
+          rm -rf _src && mkdir _src
+          unzip -q "$ZIP" -d _src
+
+          # step into the single top-level folder (needle/) if there is one
+          DIR=_src
+          if [ "$(ls -A _src | wc -l)" = "1" ] && [ -d "_src/$(ls -A _src)" ]; then
+            DIR="_src/$(ls -A _src)"
+          fi
+          if [ ! -f "$DIR/gradlew" ]; then echo "gradlew not found in $DIR"; ls -la "$DIR"; exit 1; fi
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Needle-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
