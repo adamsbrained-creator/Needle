@@ -56,7 +56,20 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --stacktrace
 
+      # Release is optimized (R8) and much smoother. If it ever fails, debug still ships.
+      - name: Build release APK
+        continue-on-error: true
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew assembleRelease --stacktrace
+
       - uses: actions/upload-artifact@v4
         with:
           name: Needle-debug-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Needle-release-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
